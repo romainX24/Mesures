@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
-"""Test de linéarité caméra vs éclairement (interactif).
+"""Test de linéarité vs temps d'exposition (lumière constante).
 
-Usage:
-  - Lancez le script près de la scène.
-  - Vérifiez que vous avez un luxmètre indépendant pour fournir la valeur de référence.
-  - Pour chaque niveau d'éclairement: entrez la valeur lux mesurée, appuyez sur Entrée -> le script capture une image RAW et enregistre la moyenne de pixels.
-  - À la fin (tapez 'q'), le script calcule une régression linéaire et sauvegarde les résultats en CSV et PNG.
+Ce script balaye différents temps d'exposition en mode manuel (AE/AGC désactivés),
+capture une image traitée en `RGB888` et calcule les moyennes des canaux R, G, B
+(sur un crop central pour limiter le vignettage). Il sauvegarde un CSV et un
+graphique des courbes R, G, B en fonction du temps d'exposition.
 
-Le script force le mode manuel (exposure/gain) pour éviter l'AGC.
+Pré-requis: lumière stable pendant tout le test.
 """
 
 import time
@@ -29,9 +28,9 @@ except Exception:
 
 
 def configure_camera(picam2, exposure_us=10000, analogue_gain=1.0):
+    # Flux principal en RGB888 pour obtenir directement R,G,B
     camera_config = picam2.create_preview_configuration(
-        main={"format": 'XRGB8888', "size": (640, 480)},
-        raw={"format": "SBGGR10", "size": (3280, 2464)}
+        main={"format": 'RGB888', "size": (640, 480)}
     )
     camera_config["controls"] = {
         "AwbEnable": 0,
@@ -45,103 +44,98 @@ def configure_camera(picam2, exposure_us=10000, analogue_gain=1.0):
     picam2.configure(camera_config)
 
 
-def central_crop_mean(arr, crop=200):
-    h, w = arr.shape
+def central_crop_rgb_means(rgb, crop=200):
+    # rgb shape: (H, W, 3)
+    h, w, _ = rgb.shape
     cy, cx = h // 2, w // 2
     half = crop // 2
-    crop_arr = arr[cy-half:cy+half, cx-half:cx+half]
-    # mask possible zeros
-    flat = crop_arr.flatten()
-    flat = flat[flat > 0]
-    if flat.size == 0:
-        return float(np.mean(crop_arr))
-    return float(np.mean(flat))
+    crop_arr = rgb[cy-half:cy+half, cx-half:cx+half, :]
+    r = float(np.mean(crop_arr[:, :, 0]))
+    g = float(np.mean(crop_arr[:, :, 1]))
+    b = float(np.mean(crop_arr[:, :, 2]))
+    return r, g, b
 
 
 def main():
     picam2 = Picamera2()
-    configure_camera(picam2)
+    # configuration initiale; on ajustera ExposureTime avant chaque capture
+    configure_camera(picam2, exposure_us=10000, analogue_gain=1.0)
     picam2.start()
     time.sleep(0.2)
 
-    samples = []
     out_dir = os.path.dirname(os.path.abspath(__file__))
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    csv_path = os.path.join(out_dir, f'linearity_results_{timestamp}.csv')
+    csv_path = os.path.join(out_dir, f'linearity_exposure_{timestamp}.csv')
 
-    print("Test de linéarité caméra vs éclairement")
-    print("Pour chaque niveau d'éclairement: entrez la valeur lux mesurée (par ex. 100) puis Entrée.")
-    print("Tapez 'q' pour quitter et lancer l'analyse.")
+    # Séquence de temps d'exposition (microsecondes). Adaptez selon votre scène.
+    exposure_us_list = [200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000]
+    print('Balayage des temps d\'exposition (us):', exposure_us_list)
+    print('Assurez une lumière constante pendant tout le test.')
 
-    while True:
-        val = input('Lux (q pour quitter) > ').strip()
-        if val.lower() in ('q', 'quit'):
-            break
-        try:
-            lux = float(val)
-        except ValueError:
-            print('Entrée non reconnue, réessayez.')
-            continue
+    records = []
 
-        # capture
-        print('Capture en cours...')
+    for exp_us in exposure_us_list:
+        # Fixer le temps d'expo (AE off)
+        picam2.set_controls({"ExposureTime": int(exp_us), "AeEnable": 0})
+        time.sleep(0.15)  # laisser le temps de prise en compte
+
         req = picam2.capture_request()
-        raw = req.make_array('raw')
-        mean_raw = central_crop_mean(raw, crop=400)
-        minv = float(raw.min())
-        maxv = float(raw.max())
+        rgb = req.make_array('main')  # RGB888
+        # sécurité: vérifier dimensions
+        if rgb.ndim != 3 or rgb.shape[2] < 3:
+            req.release()
+            print('Format inattendu pour main stream, abandon.')
+            break
+        r_mean, g_mean, b_mean = central_crop_rgb_means(rgb, crop=200)
         req.release()
 
-        print(f'✓ Capturé: mean_raw={mean_raw:.3f} min={minv} max={maxv}')
-        samples.append({'lux': lux, 'mean_raw': mean_raw, 'min': minv, 'max': maxv, 'timestamp': datetime.now().isoformat()})
+        # Lire quelques métadonnées utiles
+        meta = picam2.capture_metadata()
+        analogue_gain = float(meta.get('AnalogueGain', np.nan))
+        exposure_readback = float(meta.get('ExposureTime', np.nan))
+
+        print(f"✓ Exp={exp_us} us (meta {exposure_readback} us) | R={r_mean:.2f} G={g_mean:.2f} B={b_mean:.2f} | Gain={analogue_gain}")
+        records.append({
+            'exposure_us': exp_us,
+            'exposure_meta_us': exposure_readback,
+            'analogue_gain': analogue_gain,
+            'r_mean': r_mean,
+            'g_mean': g_mean,
+            'b_mean': b_mean,
+        })
 
     picam2.stop()
 
-    if not samples:
-        print('Aucun échantillon acquis. Fin.')
-        return
-
-    # Write CSV
+    # Sauvegarde CSV
     with open(csv_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=['timestamp', 'lux', 'mean_raw', 'min', 'max'])
+        writer = csv.DictWriter(f, fieldnames=['exposure_us', 'exposure_meta_us', 'analogue_gain', 'r_mean', 'g_mean', 'b_mean'])
         writer.writeheader()
-        for s in samples:
-            writer.writerow(s)
-
+        for rec in records:
+            writer.writerow(rec)
     print(f'CSV sauvegardé: {csv_path}')
 
-    # Analysis: fit mean_raw = a * lux + b
-    lux_arr = np.array([s['lux'] for s in samples], dtype=float)
-    y = np.array([s['mean_raw'] for s in samples], dtype=float)
+    # Graphique R,G,B vs exposure_us
+    if plt is not None and records:
+        xs = np.array([rec['exposure_us'] for rec in records], dtype=float)
+        r = np.array([rec['r_mean'] for rec in records], dtype=float)
+        g = np.array([rec['g_mean'] for rec in records], dtype=float)
+        b = np.array([rec['b_mean'] for rec in records], dtype=float)
 
-    # Simple linear fit
-    coef = np.polyfit(lux_arr, y, 1)
-    a, b = coef[0], coef[1]
-    y_pred = a * lux_arr + b
-    # R^2
-    ss_res = np.sum((y - y_pred) ** 2)
-    ss_tot = np.sum((y - np.mean(y)) ** 2)
-    r2 = 1 - ss_res / ss_tot if ss_tot != 0 else float('nan')
-
-    print('\nRésultats de la régression linéaire:')
-    print(f'  mean_raw = a * lux + b')
-    print(f'  a = {a:.6f}, b = {b:.6f}, R² = {r2:.6f}')
-
-    # Plot
-    if plt is not None:
-        plt.figure(figsize=(6,4))
-        plt.scatter(lux_arr, y, label='mesures')
-        xs = np.linspace(lux_arr.min(), lux_arr.max(), 200)
-        plt.plot(xs, a*xs + b, 'r-', label=f'fit: y={a:.3e}x+{b:.1f}\nR²={r2:.4f}')
-        plt.xlabel('Lux (référence)')
-        plt.ylabel('Mean RAW pixel value')
+        plt.figure(figsize=(7,4))
+        plt.plot(xs, r, 'r-o', label='R')
+        plt.plot(xs, g, 'g-o', label='G')
+        plt.plot(xs, b, 'b-o', label='B')
+        plt.xlabel('Temps d\'exposition (µs)')
+        plt.ylabel('Moyenne canal (RGB888)')
+        plt.title('Moyennes R,G,B vs temps d\'exposition (lumière constante)')
         plt.legend()
+        plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        png_path = os.path.join(out_dir, f'linearity_plot_{timestamp}.png')
+        png_path = os.path.join(out_dir, f'linearity_exposure_plot_{timestamp}.png')
         plt.savefig(png_path)
         print(f'Graphique sauvegardé: {png_path}')
     else:
-        print('matplotlib non disponible — pas de graphique généré.')
+        print('matplotlib non disponible ou aucun enregistrement — pas de graphique généré.')
 
     print('Terminé.')
 
