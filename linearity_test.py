@@ -38,6 +38,8 @@ def configure_camera(picam2, exposure_us=10000, analogue_gain=1.0):
         "AnalogueGainMode": 0,
         "ExposureTimeMode": 0,
         "AeEnable": 0,
+        # Désactiver flicker (si supporté) pour éviter quantification 50/60 Hz
+        "AeFlickerMode": 0,
         "ExposureTime": int(exposure_us),
         "ColourTemperature": 5500,
     }
@@ -75,26 +77,40 @@ def main():
     records = []
 
     for exp_us in exposure_us_list:
-        # Fixer le temps d'expo (AE off)
-        picam2.set_controls({"ExposureTime": int(exp_us), "AeEnable": 0})
+        # Fixer le temps d'expo et la durée de trame pour permettre des expositions longues
+        # FrameDurationLimits est un tuple (min_us, max_us)
+        picam2.set_controls({
+            "AeEnable": 0,
+            "AnalogueGain": 1.0,
+            "FrameDurationLimits": (int(exp_us), int(exp_us)),
+            "ExposureTime": int(exp_us),
+        })
         time.sleep(0.15)  # laisser le temps de prise en compte
 
+        # Captures de stabilisation (2 frames)
+        req = picam2.capture_request(); req.release()
+        req = picam2.capture_request(); req.release()
+
+        # Capture de mesure
         req = picam2.capture_request()
         rgb = req.make_array('main')  # RGB888
         # sécurité: vérifier dimensions
         if rgb.ndim != 3 or rgb.shape[2] < 3:
+            meta = req.get_metadata()
             req.release()
             print('Format inattendu pour main stream, abandon.')
             break
         r_mean, g_mean, b_mean = central_crop_rgb_means(rgb, crop=200)
+
+        # Lire les métadonnées associées à CETTE capture
+        meta = req.get_metadata()
         req.release()
 
-        # Lire quelques métadonnées utiles
-        meta = picam2.capture_metadata()
         analogue_gain = float(meta.get('AnalogueGain', np.nan))
         exposure_readback = float(meta.get('ExposureTime', np.nan))
+        frame_limits = meta.get('FrameDurationLimits', None)
 
-        print(f"✓ Exp={exp_us} us (meta {exposure_readback} us) | R={r_mean:.2f} G={g_mean:.2f} B={b_mean:.2f} | Gain={analogue_gain}")
+        print(f"✓ Exp={exp_us} us (meta {exposure_readback} us, limits={frame_limits}) | R={r_mean:.2f} G={g_mean:.2f} B={b_mean:.2f} | Gain={analogue_gain}")
         records.append({
             'exposure_us': exp_us,
             'exposure_meta_us': exposure_readback,
@@ -102,6 +118,7 @@ def main():
             'r_mean': r_mean,
             'g_mean': g_mean,
             'b_mean': b_mean,
+            'frame_limits': frame_limits,
         })
 
     picam2.stop()
