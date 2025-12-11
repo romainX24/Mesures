@@ -41,6 +41,8 @@ def configure_camera(picam2, exposure_us=10000, analogue_gain=1.0):
         # Désactiver flicker (si supporté) pour éviter quantification 50/60 Hz
         "AeFlickerMode": 0,
         "ExposureTime": int(exposure_us),
+        # Étendre la durée de trame par défaut pour permettre des expositions longues
+        "FrameDurationLimits": (250000, 250000),  # 250 ms
         "ColourTemperature": 5500,
     }
     picam2.configure(camera_config)
@@ -58,6 +60,24 @@ def central_crop_rgb_means(rgb, crop=200):
     return r, g, b
 
 
+def wait_until_exposure_applied(picam2, target_us, max_wait_s=1.0, tol_frac=0.05):
+    """Capture des frames jusqu'à ce que les métadonnées reflètent ~target_us.
+    Retourne (applied_us, last_meta)."""
+    deadline = time.time() + max_wait_s
+    applied_us = float('nan')
+    last_meta = {}
+    while time.time() < deadline:
+        req = picam2.capture_request()
+        meta = req.get_metadata()
+        req.release()
+        applied_us = float(meta.get('ExposureTime', float('nan')))
+        if np.isfinite(applied_us) and target_us > 0:
+            if abs(applied_us - target_us) / target_us <= tol_frac:
+                return applied_us, meta
+        last_meta = meta
+    return applied_us, last_meta
+
+
 def main():
     picam2 = Picamera2()
     # configuration initiale; on ajustera ExposureTime avant chaque capture
@@ -70,7 +90,7 @@ def main():
     csv_path = os.path.join(out_dir, f'linearity_exposure_{timestamp}.csv')
 
     # Séquence de temps d'exposition (microsecondes). Adaptez selon votre scène.
-    exposure_us_list = [200, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000]
+    exposure_us_list = [100,300, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000,150000, 200000]
     print('Balayage des temps d\'exposition (us):', exposure_us_list)
     print('Assurez une lumière constante pendant tout le test.')
 
@@ -85,11 +105,14 @@ def main():
             "FrameDurationLimits": (int(exp_us), int(exp_us)),
             "ExposureTime": int(exp_us),
         })
-        time.sleep(0.15)  # laisser le temps de prise en compte
+        time.sleep(0.05)  # petite latence
 
-        # Captures de stabilisation (2 frames)
-        req = picam2.capture_request(); req.release()
-        req = picam2.capture_request(); req.release()
+        # Attendre que la valeur soit appliquée (tolérance 5%)
+        applied_us, meta_applied = wait_until_exposure_applied(picam2, exp_us, max_wait_s=1.0, tol_frac=0.05)
+        if not np.isfinite(applied_us):
+            # réessayer en imposant de nouveau FrameDurationLimits
+            picam2.set_controls({"FrameDurationLimits": (int(exp_us), int(exp_us))})
+            applied_us, meta_applied = wait_until_exposure_applied(picam2, exp_us, max_wait_s=1.0, tol_frac=0.05)
 
         # Capture de mesure
         req = picam2.capture_request()
@@ -110,7 +133,8 @@ def main():
         exposure_readback = float(meta.get('ExposureTime', np.nan))
         frame_limits = meta.get('FrameDurationLimits', None)
 
-        print(f"✓ Exp={exp_us} us (meta {exposure_readback} us, limits={frame_limits}) | R={r_mean:.2f} G={g_mean:.2f} B={b_mean:.2f} | Gain={analogue_gain}")
+        status = "OK" if np.isfinite(applied_us) and abs(applied_us - exp_us) / max(exp_us, 1) <= 0.05 else "CLAMPED"
+        print(f"✓ Exp={exp_us} us (meta {exposure_readback} us, limits={frame_limits}, status={status}) | R={r_mean:.2f} G={g_mean:.2f} B={b_mean:.2f} | Gain={analogue_gain}")
         records.append({
             'exposure_us': exp_us,
             'exposure_meta_us': exposure_readback,
@@ -119,32 +143,43 @@ def main():
             'g_mean': g_mean,
             'b_mean': b_mean,
             'frame_limits': frame_limits,
+            'status': status,
         })
 
     picam2.stop()
 
     # Sauvegarde CSV
     with open(csv_path, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=['exposure_us', 'exposure_meta_us', 'analogue_gain', 'r_mean', 'g_mean', 'b_mean'])
+        writer = csv.DictWriter(
+            f,
+            fieldnames=['exposure_us', 'exposure_meta_us', 'analogue_gain', 'r_mean', 'g_mean', 'b_mean', 'frame_limits', 'status']
+        )
         writer.writeheader()
         for rec in records:
+            # Normaliser frame_limits pour CSV
+            fl = rec.get('frame_limits', None)
+            rec['frame_limits'] = '' if fl is None else str(fl)
             writer.writerow(rec)
     print(f'CSV sauvegardé: {csv_path}')
 
-    # Graphique R,G,B vs exposure_us
+    # Graphique R,G,B vs exposure_meta_us (exposition réellement appliquée)
     if plt is not None and records:
-        xs = np.array([rec['exposure_us'] for rec in records], dtype=float)
+        xs = np.array([rec['exposure_meta_us'] for rec in records], dtype=float)
         r = np.array([rec['r_mean'] for rec in records], dtype=float)
         g = np.array([rec['g_mean'] for rec in records], dtype=float)
         b = np.array([rec['b_mean'] for rec in records], dtype=float)
 
+        # Trier par X pour des courbes propres
+        order = np.argsort(xs)
+        xs, r, g, b = xs[order], r[order], g[order], b[order]
+
         plt.figure(figsize=(7,4))
         plt.plot(xs, r, 'r-o', label='R')
         plt.plot(xs, g, 'g-o', label='G')
-        plt.plot(xs, b, 'b-o', label='B')
+        #plt.plot(xs, b, 'b-o', label='B')
         plt.xlabel('Temps d\'exposition (µs)')
         plt.ylabel('Moyenne canal (RGB888)')
-        plt.title('Moyennes R,G,B vs temps d\'exposition (lumière constante)')
+        plt.title('Moyennes R,G,B vs exposition (meta µs, lumière constante)')
         plt.legend()
         plt.grid(True, alpha=0.3)
         plt.tight_layout()

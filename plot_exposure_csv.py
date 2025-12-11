@@ -14,7 +14,8 @@ def load_csv(path):
         reader = csv.DictReader(f)
         for row in reader:
             try:
-                exp = float(row['exposure_us'])
+                # utiliser l'exposition réellement appliquée
+                exp = float(row.get('exposure_meta_us', row['exposure_us']))
                 r_mean = float(row['r_mean'])
                 g_mean = float(row['g_mean'])
                 b_mean = float(row['b_mean'])
@@ -32,13 +33,16 @@ def plot_rgb_vs_exposure(csv_path):
     if xs.size == 0:
         print('Aucune donnée lisible dans le CSV.')
         return
+    # Trier par X pour des courbes propres
+    order = np.argsort(xs)
+    xs, r, g, b = xs[order], r[order], g[order], b[order]
     plt.figure(figsize=(7,4))
     plt.plot(xs, r, 'r-o', label='R')
     plt.plot(xs, g, 'g-o', label='G')
     plt.plot(xs, b, 'b-o', label='B')
-    plt.xlabel("Temps d'exposition (µs)")
+    plt.xlabel("Exposition appliquée (meta µs)")
     plt.ylabel('Moyenne canal (RGB888)')
-    plt.title("R, G, B vs temps d'exposition")
+    plt.title("R, G, B vs exposition (meta µs)")
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
