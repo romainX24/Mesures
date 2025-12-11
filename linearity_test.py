@@ -79,12 +79,6 @@ def wait_until_exposure_applied(picam2, target_us, max_wait_s=1.0, tol_frac=0.05
 
 
 def main():
-    picam2 = Picamera2()
-    # configuration initiale; on ajustera ExposureTime avant chaque capture
-    configure_camera(picam2, exposure_us=10000, analogue_gain=1.0)
-    picam2.start()
-    time.sleep(0.2)
-
     out_dir = os.path.dirname(os.path.abspath(__file__))
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     csv_path = os.path.join(out_dir, f'linearity_exposure_{timestamp}.csv')
@@ -93,6 +87,19 @@ def main():
     exposure_us_list = [100,300, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000,150000, 200000]
     print('Balayage des temps d\'exposition (us):', exposure_us_list)
     print('Assurez une lumière constante pendant tout le test.')
+
+    # Initialiser avec la première exposition avant de démarrer pour éviter 9999 µs au premier point
+    first_exp = exposure_us_list[0]
+    picam2 = Picamera2()
+    configure_camera(picam2, exposure_us=first_exp, analogue_gain=1.0)
+    picam2.start()
+    time.sleep(0.2)
+    
+    # Stabilisation initiale: jeter quelques frames pour que le premier point soit fiable
+    for _ in range(3):
+        req = picam2.capture_request()
+        req.release()
+    time.sleep(0.1)
 
     records = []
 
@@ -113,6 +120,12 @@ def main():
             # réessayer en imposant de nouveau FrameDurationLimits
             picam2.set_controls({"FrameDurationLimits": (int(exp_us), int(exp_us))})
             applied_us, meta_applied = wait_until_exposure_applied(picam2, exp_us, max_wait_s=1.0, tol_frac=0.05)
+
+        # Stabiliser avec 2 frames avant capture de mesure
+        req = picam2.capture_request()
+        req.release()
+        req = picam2.capture_request()
+        req.release()
 
         # Capture de mesure
         req = picam2.capture_request()
