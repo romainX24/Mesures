@@ -176,7 +176,7 @@ def main():
         plt.figure(figsize=(7,4))
         plt.plot(xs, r, 'r-o', label='R')
         plt.plot(xs, g, 'g-o', label='G')
-        #plt.plot(xs, b, 'b-o', label='B')
+        plt.plot(xs, b, 'b-o', label='B')
         plt.xlabel('Temps d\'exposition (µs)')
         plt.ylabel('Moyenne canal (RGB888)')
         plt.title('Moyennes R,G,B vs exposition (meta µs, lumière constante)')
