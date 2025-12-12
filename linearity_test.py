@@ -84,7 +84,7 @@ def main():
     csv_path = os.path.join(out_dir, f'linearity_exposure_{timestamp}.csv')
 
     # Séquence de temps d'exposition (microsecondes). Adaptez selon votre scène.
-    exposure_us_list = [100,300, 500, 1000, 2000, 5000, 10000, 20000, 50000, 100000,150000, 200000]
+    exposure_us_list = [100,300, 500, 1000, 1500, 2000, 3000, 5000, 7500, 10000, 12000, 15000, 17000, 20000, 30000, 50000, 70000, 100000,125000, 150000, 175000,200000]
     print('Balayage des temps d\'exposition (us):', exposure_us_list)
     print('Assurez une lumière constante pendant tout le test.')
 
