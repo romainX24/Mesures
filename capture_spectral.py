@@ -57,7 +57,7 @@ def main():
     
     # Initialize camera
     print("Initializing camera...")
-    exposure_us = 1000  # Fixed exposure time (20 ms)
+    exposure_us = 5000  # Fixed exposure time (20 ms)
     picam2 = Picamera2()
     configure_camera(picam2, exposure_us=exposure_us, analogue_gain=1.0)
     picam2.start()
