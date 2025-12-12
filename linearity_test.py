@@ -26,6 +26,11 @@ try:
 except Exception:
     plt = None
 
+try:
+    from PIL import Image
+except Exception:
+    raise SystemExit("PIL non trouvé. Installez-le avec: pip3 install pillow")
+
 
 def configure_camera(picam2, exposure_us=10000, analogue_gain=1.0):
     # Flux principal en RGB888 pour obtenir directement R,G,B
@@ -81,12 +86,19 @@ def wait_until_exposure_applied(picam2, target_us, max_wait_s=1.0, tol_frac=0.05
 def main():
     out_dir = os.path.dirname(os.path.abspath(__file__))
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    
+    # Create subfolder for this measurement
+    photos_dir = os.path.join(out_dir, f'photos_{timestamp}')
+    os.makedirs(photos_dir, exist_ok=True)
+    
     csv_path = os.path.join(out_dir, f'linearity_exposure_{timestamp}.csv')
 
     # Séquence de temps d'exposition (microsecondes). Adaptez selon votre scène.
     exposure_us_list = [100,300, 500, 1000, 1500, 2000, 3000, 5000, 7500, 10000, 12000, 15000, 17000, 20000, 30000, 50000, 70000, 100000,125000, 150000, 175000,200000]
     print('Balayage des temps d\'exposition (us):', exposure_us_list)
     print('Assurez une lumière constante pendant tout le test.')
+    print(f'Photos sauvegardées dans: {photos_dir}')
+    print()
 
     # Initialiser avec la première exposition avant de démarrer pour éviter 9999 µs au premier point
     first_exp = exposure_us_list[0]
@@ -136,6 +148,8 @@ def main():
             req.release()
             print('Format inattendu pour main stream, abandon.')
             break
+        
+        # Calculate means only on center region
         r_mean, g_mean, b_mean = central_crop_rgb_means(rgb, crop=200)
 
         # Lire les métadonnées associées à CETTE capture
@@ -145,6 +159,12 @@ def main():
         analogue_gain = float(meta.get('AnalogueGain', np.nan))
         exposure_readback = float(meta.get('ExposureTime', np.nan))
         frame_limits = meta.get('FrameDurationLimits', None)
+        
+        # Save photo (RGB888 as PNG)
+        img = Image.fromarray(rgb.astype(np.uint8), 'RGB')
+        photo_filename = f'exp_{exp_us:06d}us_meta_{exposure_readback:.0f}us.png'
+        photo_path = os.path.join(photos_dir, photo_filename)
+        img.save(photo_path)
 
         status = "OK" if np.isfinite(applied_us) and abs(applied_us - exp_us) / max(exp_us, 1) <= 0.05 else "CLAMPED"
         print(f"✓ Exp={exp_us} us (meta {exposure_readback} us, limits={frame_limits}, status={status}) | R={r_mean:.2f} G={g_mean:.2f} B={b_mean:.2f} | Gain={analogue_gain}")
