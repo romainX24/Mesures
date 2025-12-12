@@ -81,14 +81,32 @@ def load_dng_raw(dng_path):
         f.seek(strip_offset)
         raw_bytes = f.read(strip_bytes)
         
-        # Convert to numpy array (assuming 10-bit or 16-bit data)
-        if bits_per_sample == 16:
-            dtype = np.uint16
+        # For 10-bit packed data (5 bytes = 4 pixels of 10 bits each)
+        if bits_per_sample == 10:
+            # Unpack 10-bit data
+            num_pixels = (len(raw_bytes) * 8) // 10
+            raw_data = np.zeros(num_pixels, dtype=np.uint16)
+            
+            byte_idx = 0
+            for i in range(0, num_pixels, 4):
+                if byte_idx + 4 >= len(raw_bytes):
+                    break
+                # 5 bytes contain 4 pixels of 10 bits
+                b0, b1, b2, b3, b4 = raw_bytes[byte_idx:byte_idx+5]
+                raw_data[i+0] = (b0 << 2) | (b1 >> 6)
+                raw_data[i+1] = ((b1 & 0x3F) << 4) | (b2 >> 4)
+                raw_data[i+2] = ((b2 & 0x0F) << 6) | (b3 >> 2)
+                raw_data[i+3] = ((b3 & 0x03) << 8) | b4
+                byte_idx += 5
+            
+            # Trim to actual size
+            raw_data = raw_data[:width*height]
+        elif bits_per_sample == 16:
+            raw_data = np.frombuffer(raw_bytes, dtype=f'{endian}u2')
         else:
-            dtype = np.uint16  # Will be packed 10-bit, but we'll read as 16
+            raw_data = np.frombuffer(raw_bytes, dtype=np.uint16)
         
-        # Parse raw data
-        raw_data = np.frombuffer(raw_bytes, dtype=dtype)
+        # Reshape
         raw_data = raw_data.reshape((height, width))
         
         return raw_data
@@ -97,8 +115,6 @@ def load_dng_raw(dng_path):
 def analyze_raw(dng_path, crop_size=200):
     """
     Analyze RAW DNG image and extract R, G, B statistics from center.
-    
-    DNG files are TIFF-based. We extract the IFD to read raw data.
     
     Args:
         dng_path: Path to DNG file
@@ -110,12 +126,8 @@ def analyze_raw(dng_path, crop_size=200):
     if not os.path.exists(dng_path):
         raise FileNotFoundError(f"File not found: {dng_path}")
     
-    # Open DNG as PIL Image (TIFF)
-    img = Image.open(dng_path)
-    
-    # DNG is stored as a single-channel image with CFA (Bayer) pattern
-    # Get the raw pixel data
-    raw_data = np.array(img, dtype=np.uint16)
+    # Load raw data from DNG
+    raw_data = load_dng_raw(dng_path)
     
     h, w = raw_data.shape
     print(f"Raw image dimensions: {w} x {h}")
